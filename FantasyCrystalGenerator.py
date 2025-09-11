@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Fantasy Crystal Generator",
     "author": "you + a helpful assistant",
-    "version": (1, 6, 0),
+    "version": (1, 7, 1),
     "blender": (4, 0, 0),
     "location": "View3D > N-Panel > Crystals",
-    "description": "Fantasy crystal clusters with fractal branching, distributions, live preview cluster, radial growth, angle distribution, top enlargement, and custom polygon sides",
+    "description": "Fantasy crystal clusters with fractal branching, distributions, live preview, radial growth w/ angle distributions, top enlargement, polygon sides, and baking to mesh",
     "category": "Add Mesh",
 }
 
@@ -82,7 +82,6 @@ def set_material_params(mat, roughness, ior, emission):
 # =========================
 
 def add_displace_modifier(obj, strength=0.06, midlevel=0.0, scale=2.0, detail=6):
-    # Legacy texture datablock used by Displace modifier
     tex = bpy.data.textures.new(name=f"DispTex_{obj.name}", type='MUSGRAVE')
     tex.noise_scale = float(scale)
     if hasattr(tex, "dimension"):  tex.dimension  = 2.0
@@ -125,19 +124,14 @@ def sample_pdf(u, pdf="UNIFORM"):
     if pdf == "UNIFORM":
         return u
     if pdf == "BELL":
-        # bell-ish curve around 0.5
         return (3*u*u - 2*u*u*u + (1 - (3*(1-u)*(1-u) - 2*(1-u)*(1-u)*(1-u)))) * 0.5
     if pdf == "SKEW_SMALL":
-        return u*u           # bias small
+        return u*u
     if pdf == "SKEW_LARGE":
-        return u**0.5        # bias large
+        return u**0.5
     return u
 
 def apply_center_bias(value01, r_norm, center_bias):
-    """
-    center_bias: -1..+1 (positive => bigger near center, negative => bigger near edge)
-    r_norm: 0 center, 1 edge (relative to cluster radius)
-    """
     influence = (1.0 - r_norm) if center_bias >= 0 else r_norm
     k = abs(center_bias)
     target = 1.0 if center_bias > 0 else 0.0
@@ -149,10 +143,6 @@ def apply_center_bias(value01, r_norm, center_bias):
 
 def make_prism(height=2.0, radius=0.2, sides=6, taper_top=0.5, top_enlarge=1.0,
                tipify=True, tip_height_ratio=0.12):
-    """
-    General N-gon prism with tapered (or flared) and optionally enlarged top, with a tip.
-    Returns an unlinked object (caller links to target collection).
-    """
     sides = max(3, int(sides))
     mesh = bpy.data.meshes.new("CrystalMesh")
     obj = bpy.data.objects.new("Crystal", mesh)
@@ -160,7 +150,6 @@ def make_prism(height=2.0, radius=0.2, sides=6, taper_top=0.5, top_enlarge=1.0,
     bm = bmesh.new()
     bmesh.ops.create_circle(bm, cap_ends=True, radius=radius, segments=sides)
 
-    # Extrude up
     geom_extrude = bmesh.ops.extrude_face_region(bm, geom=[f for f in bm.faces])
     verts_extruded = [ele for ele in geom_extrude["geom"] if isinstance(ele, bmesh.types.BMVert)]
     for v in verts_extruded:
@@ -169,18 +158,15 @@ def make_prism(height=2.0, radius=0.2, sides=6, taper_top=0.5, top_enlarge=1.0,
     faces_sorted = sorted(bm.faces, key=lambda f: f.calc_center_median().z)
     top_face = faces_sorted[-1]
 
-    # Taper/flare
     top_center = top_face.calc_center_median()
     factor = max(0.001, taper_top)
     for v in top_face.verts:
         v.co.xy = top_center.xy + (v.co.xy - top_center.xy) * factor
 
-    # Additional enlargement (post-taper), for big cap forms
     if top_enlarge != 1.0:
         for v in top_face.verts:
             v.co.xy = top_center.xy + (v.co.xy - top_center.xy) * max(0.001, float(top_enlarge))
 
-    # Tip
     if tipify and tip_height_ratio > 0:
         tip_h = height * tip_height_ratio
         geom_extrude2 = bmesh.ops.extrude_face_region(bm, geom=[top_face])
@@ -207,44 +193,36 @@ class CRYSTAL_Params:
         self.seed  = int(props.seed)
         self.cluster_radius = float(props.cluster_radius)
         self.inner_spawn_radius = max(0.0, min(float(props.inner_spawn_radius), self.cluster_radius))
-        # ranges
         self.min_height = float(props.min_height)
         self.max_height = float(props.max_height)
         self.base_radius_min = float(min(props.base_radius_min, props.base_radius_max))
         self.base_radius_max = float(max(props.base_radius_min, props.base_radius_max))
-        # shape
         self.sides = int(props.sides)
-        self.taper_top = float(props.taper_top)          # 0..2
-        self.top_enlarge = float(props.top_enlarge)      # independent post-taper scale
+        self.taper_top = float(props.taper_top)
+        self.top_enlarge = float(props.top_enlarge)
         self.tip_ratio = float(props.tip_ratio)
-        self.lean_bias_deg = float(props.lean_bias_deg)  # can be negative
+        self.lean_bias_deg = float(props.lean_bias_deg)
         self.max_lean_deg  = float(props.max_lean_deg)
-        # surface
         self.disp_strength  = float(props.disp_strength)
         self.disp_scale     = float(props.disp_scale)
         self.disp_detail    = int(props.disp_detail)
         self.bevel_width    = float(props.bevel_width)
         self.bevel_segments = int(props.bevel_segments)
         self.bevel_angle_deg= float(props.bevel_angle_deg)
-        # material
         self.roughness = float(props.roughness)
         self.ior       = float(props.ior)
         self.emission  = float(props.emission)
-        # fractal
         self.fractal_depth       = int(props.fractal_depth)
         self.fractal_branch_prob = float(props.fractal_branch_prob)
         self.fractal_scale_min   = float(min(props.fractal_scale_min, props.fractal_scale_max))
-        self.fractal_scale_max   = float(min(0.95, max(props.fractal_scale_min, props.fractal_scale_max)))  # < 1.0
+        self.fractal_scale_max   = float(min(0.95, max(props.fractal_scale_min, props.fractal_scale_max)))
         self.fractal_branch_tilt = float(props.fractal_branch_tilt)
-        # distributions
         self.size_pdf = props.size_pdf
         self.center_size_bias = float(props.center_size_bias)
-        # preview
         self.preview_use_full = bool(props.preview_use_full)
         self.preview_count = int(props.preview_count)
-        # radial growth
         self.radial_growth = bool(props.radial_growth)
-        self.radial_tilt_mode = props.radial_tilt_mode   # "CONSTANT" or "CENTER_TO_EDGE"
+        self.radial_tilt_mode = props.radial_tilt_mode
         self.surface_tilt_deg = float(props.surface_tilt_deg)
         self.angle_center_deg = float(props.angle_center_deg)
         self.angle_edge_deg   = float(props.angle_edge_deg)
@@ -265,24 +243,21 @@ def sample_height_and_radius(params, r_norm):
     return height, base_r
 
 def pick_position(inner_r, outer_r):
-    # uniform area sampling in an annulus
     r = (random.random()*(outer_r**2 - inner_r**2) + inner_r**2) ** 0.5
     t = random.uniform(0, 2*pi)
     return r, t, Vector((r * cos(t), r * sin(t), 0.0))
 
 def lean_euler(lean_bias_deg, max_lean_deg):
-    # symmetric lean around bias; negatives allowed
     x = random.uniform(-max_lean_deg, max_lean_deg) + lean_bias_deg
     y = random.uniform(-max_lean_deg, max_lean_deg) + lean_bias_deg
     z = random.uniform(0, 360)
     return Euler((radians(x), radians(y), radians(z)), 'XYZ')
 
 def align_z_to_vector(vec: Vector):
-    # Return a rotation aligning +Z to 'vec'
     if vec.length == 0:
         return Euler((0.0, 0.0, 0.0), 'XYZ')
     v = vec.normalized()
-    quat = v.to_track_quat('Z', 'Y')  # track +Z to v
+    quat = v.to_track_quat('Z', 'Y')
     return quat.to_euler()
 
 def crystal_one(height, base_radius, params):
@@ -314,16 +289,13 @@ def branch_children(parent, parent_height, parent_radius, params, depth_left, co
     for _ in range(n_branches):
         if random.random() > params.fractal_branch_prob:
             continue
-        # strictly thinner/smaller than parent
-        scale = random.uniform(params.fractal_scale_min, params.fractal_scale_max)  # < 1
+        scale = random.uniform(params.fractal_scale_min, params.fractal_scale_max)
         c_height = max(0.05, parent_height * scale)
         c_radius = max(0.01, parent_radius * scale)
 
         child = crystal_one(c_height, c_radius, params)
-        # place near parent tip
         top_local = Vector((0, 0, parent.dimensions.z * 0.6))
         child.location = parent.matrix_world @ top_local
-        # orient child with tilt
         child.rotation_euler = Euler((
             radians(random.uniform(-params.fractal_branch_tilt, params.fractal_branch_tilt)),
             radians(random.uniform(-params.fractal_branch_tilt, params.fractal_branch_tilt)),
@@ -344,32 +316,24 @@ def build_cluster(params, collection, count=None, with_base=True):
 
     for _ in range(total):
         r, t, pos = pick_position(params.inner_spawn_radius, params.cluster_radius)
-        r_norm = 0.0 if params.cluster_radius <= 1e-8 else min(1.0, r / params.cluster_radius)  # 0 center .. 1 edge of whole cluster
-        r_annulus = min(1.0, max(0.0, (r - params.inner_spawn_radius) / denom))  # 0 at inner_spawn_radius .. 1 at cluster_radius
+        r_norm = 0.0 if params.cluster_radius <= 1e-8 else min(1.0, r / params.cluster_radius)
+        r_annulus = min(1.0, max(0.0, (r - params.inner_spawn_radius) / denom))
 
         height, base_r = sample_height_and_radius(params, r_norm)
         c = crystal_one(height, base_r, params)
         c.location = pos
 
-        # Orientation
         if params.radial_growth:
-            # Align +Z to outward radial normal
             eul_align = align_z_to_vector(pos)
             c.rotation_euler = eul_align
-
-            # Base tilt: constant OR center->edge interpolation
             if params.radial_tilt_mode == "CENTER_TO_EDGE":
                 base_tilt = params.angle_center_deg + r_annulus * (params.angle_edge_deg - params.angle_center_deg)
             else:
                 base_tilt = params.surface_tilt_deg
-
-            # Jitter and optional yaw around normal
             tilt = base_tilt + random.uniform(-params.surface_tilt_jitter, params.surface_tilt_jitter)
             if params.radial_yaw_random:
                 c.rotation_euler.rotate_axis('Z', radians(random.uniform(0, 360)))
-            # Tilt away from normal around a tangent axis (local X)
             c.rotation_euler.rotate_axis('X', radians(tilt))
-        # else: keep lean-based random euler from crystal_one()
 
         collection.objects.link(c)
         if params.fractal_depth > 0:
@@ -559,8 +523,15 @@ class CRYSTALGEN_Props(bpy.types.PropertyGroup):
         update=_update_callback
     )
 
+    # bookkeeping & bake options
+    last_cluster_name: bpy.props.StringProperty(name="Last Cluster", default="")
+    bake_join_into_one: bpy.props.BoolProperty(name="Join Into One", default=False)
+    bake_triangulate:   bpy.props.BoolProperty(name="Triangulate", default=False)
+    bake_include_base:  bpy.props.BoolProperty(name="Include Base", default=False)
+    bake_keep_originals:bpy.props.BoolProperty(name="Keep Originals", default=True)
+
 # =========================
-# Operators
+# Operators — Generate
 # =========================
 
 def _make_collection(name):
@@ -571,17 +542,13 @@ def _make_collection(name):
     return coll
 
 class CRYSTALGEN_OT_generate_random(bpy.types.Operator):
-    """Generate a fully random cluster within reasonable limits"""
     bl_idname = "crystalgen.generate_random_cluster"
     bl_label = "Generate Crystal Cluster"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        # Clear preview, pause live preview
-        try:
-            _clear_preview_now()
-        except:
-            pass
+        try: _clear_preview_now()
+        except: pass
         props = getattr(context.scene, "crystalgen", None)
         restore_live = None
         if props:
@@ -592,7 +559,6 @@ class CRYSTALGEN_OT_generate_random(bpy.types.Operator):
         random.seed(seed)
         class P: pass
         p = P()
-        # randomized, sane ranges
         p.count = random.randint(14, 42)
         p.seed  = seed
         p.cluster_radius = random.uniform(1.0, 2.0)
@@ -616,16 +582,13 @@ class CRYSTALGEN_OT_generate_random(bpy.types.Operator):
         p.roughness = random.uniform(0.01, 0.06)
         p.ior       = random.uniform(1.38, 1.55)
         p.emission  = random.uniform(0.0, 2.5)
-        # fractal (sometimes)
         p.fractal_depth       = random.choice([0,0,1,1,2])
         p.fractal_branch_prob = random.uniform(0.4, 0.75)
         p.fractal_scale_min   = 0.3
         p.fractal_scale_max   = 0.65
         p.fractal_branch_tilt = random.uniform(12.0, 24.0)
-        # distributions
         p.size_pdf = random.choice(["UNIFORM","BELL","SKEW_SMALL","SKEW_LARGE"])
         p.center_size_bias = random.uniform(-0.6, 0.8)
-        # radial
         p.radial_growth = random.choice([False, False, True])
         p.radial_tilt_mode = random.choice(["CENTER_TO_EDGE","CONSTANT"])
         p.surface_tilt_deg = random.uniform(6.0, 18.0)
@@ -633,7 +596,6 @@ class CRYSTALGEN_OT_generate_random(bpy.types.Operator):
         p.angle_edge_deg   = random.uniform(10.0, 24.0)
         p.surface_tilt_jitter = random.uniform(2.0, 10.0)
         p.radial_yaw_random = True
-        # preview
         p.preview_use_full = True
         p.preview_count = 12
 
@@ -641,24 +603,22 @@ class CRYSTALGEN_OT_generate_random(bpy.types.Operator):
         coll = _make_collection(f"CrystalCluster_{seed}")
         created, _ = build_cluster(params, coll, with_base=True)
 
-        if props and restore_live is not None:
-            props.live_preview = restore_live
+        if props:
+            props.last_cluster_name = coll.name
+            if restore_live is not None:
+                props.live_preview = restore_live
 
         self.report({'INFO'}, f"Random cluster (seed {seed}) with {len(created)} roots in {coll.name}")
         return {'FINISHED'}
 
 class CRYSTALGEN_OT_generate_custom(bpy.types.Operator):
-    """Generate a cluster using the panel settings (seeded)"""
     bl_idname = "crystalgen.generate_custom"
     bl_label = "Generate Custom"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        # Clear preview, pause live preview
-        try:
-            _clear_preview_now()
-        except:
-            pass
+        try: _clear_preview_now()
+        except: pass
         props = context.scene.crystalgen
         restore_live = props.live_preview
         props.live_preview = False
@@ -668,9 +628,92 @@ class CRYSTALGEN_OT_generate_custom(bpy.types.Operator):
         coll = _make_collection(f"CrystalCluster_{props.seed}")
         created, _ = build_cluster(params, coll, with_base=True)
 
+        props.last_cluster_name = coll.name
         props.live_preview = restore_live
 
         self.report({'INFO'}, f"Custom cluster (seed {props.seed}) with {len(created)} roots in {coll.name}")
+        return {'FINISHED'}
+
+# =========================
+# Operator — Bake to Mesh
+# =========================
+
+class CRYSTALGEN_OT_bake_last(bpy.types.Operator):
+    """Apply modifiers to the last generated cluster and output real meshes"""
+    bl_idname = "crystalgen.bake_last_cluster"
+    bl_label = "Bake Last Cluster"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        sprops = context.scene.crystalgen
+        coll_name = sprops.last_cluster_name.strip()
+        if not coll_name:
+            self.report({'ERROR'}, "No last cluster recorded. Generate a cluster first.")
+            return {'CANCELLED'}
+        src = bpy.data.collections.get(coll_name)
+        if not src:
+            self.report({'ERROR'}, f"Collection '{coll_name}' not found.")
+            return {'CANCELLED'}
+
+        join_into_one = sprops.bake_join_into_one
+        triangulate   = sprops.bake_triangulate
+        include_base  = sprops.bake_include_base
+        keep_originals= sprops.bake_keep_originals
+
+        baked_name = f"{coll_name}_Baked"
+        dst = bpy.data.collections.get(baked_name) or bpy.data.collections.new(baked_name)
+        if not dst.name in bpy.context.scene.collection.children:
+            bpy.context.scene.collection.children.link(dst)
+
+        deps = bpy.context.evaluated_depsgraph_get()
+        baked_objects = []
+
+        for obj in list(src.objects):
+            if obj.type != 'MESH':
+                continue
+            is_base = obj.name.startswith("ClusterBase_")
+            if is_base and not include_base:
+                continue
+
+            obj_eval = obj.evaluated_get(deps)
+            new_mesh = bpy.data.meshes.new_from_object(obj_eval, preserve_all_data_layers=True, depsgraph=deps)
+            new_obj = bpy.data.objects.new(obj.name + "_Baked", new_mesh)
+            new_obj.matrix_world = obj.matrix_world.copy()
+            new_obj.display_type = 'SOLID'
+            dst.objects.link(new_obj)
+            baked_objects.append(new_obj)
+
+        if not baked_objects:
+            self.report({'WARNING'}, "No mesh objects found to bake in last cluster.")
+            return {'CANCELLED'}
+
+        if triangulate:
+            for o in baked_objects:
+                me = o.data
+                bm = bmesh.new()
+                bm.from_mesh(me)
+                bmesh.ops.triangulate(bm, faces=bm.faces)
+                bm.to_mesh(me); bm.free()
+
+        if join_into_one and len(baked_objects) > 1:
+            # Try context join; if it fails, leave separate (keeps baking successful)
+            try:
+                for o in baked_objects: o.select_set(True)
+                bpy.context.view_layer.objects.active = baked_objects[0]
+                bpy.ops.object.join()
+                baked_objects = [baked_objects[0]]
+                baked_objects[0].name = baked_name
+            except Exception as e:
+                self.report({'WARNING'}, f"Join failed in this context; kept {len(baked_objects)} separate. ({e})")
+
+        if not keep_originals:
+            for obj in list(src.objects):
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except:
+                    pass
+
+        self.report({'INFO'}, f"Baked {len(baked_objects)} object(s) to collection '{baked_name}'.")
         return {'FINISHED'}
 
 # =========================
@@ -698,15 +741,12 @@ class CRYSTALGEN_PT_panel(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "preview_use_full")
         if not props.preview_use_full:
-            row = box.row(align=True)
-            row.prop(props, "preview_count")
+            row = box.row(align=True); row.prop(props, "preview_count")
 
         col = layout.box().column(align=True)
         col.label(text="Counts, Seed & Cluster")
-        col.prop(props, "count")
-        col.prop(props, "seed")
-        col.prop(props, "cluster_radius")
-        col.prop(props, "inner_spawn_radius")
+        col.prop(props, "count"); col.prop(props, "seed")
+        col.prop(props, "cluster_radius"); col.prop(props, "inner_spawn_radius")
 
         col = layout.box().column(align=True)
         col.label(text="Size Ranges")
@@ -716,53 +756,47 @@ class CRYSTALGEN_PT_panel(bpy.types.Panel):
 
         col = layout.box().column(align=True)
         col.label(text="Distributions")
-        col.prop(props, "size_pdf")
-        col.prop(props, "center_size_bias")
+        col.prop(props, "size_pdf"); col.prop(props, "center_size_bias")
 
         col = layout.box().column(align=True)
         col.label(text="Shape")
         col.prop(props, "sides")
-        col.prop(props, "taper_top")
-        col.prop(props, "top_enlarge")
-        col.prop(props, "tip_ratio")
-        col.prop(props, "lean_bias_deg")
-        col.prop(props, "max_lean_deg")
+        col.prop(props, "taper_top"); col.prop(props, "top_enlarge"); col.prop(props, "tip_ratio")
+        col.prop(props, "lean_bias_deg"); col.prop(props, "max_lean_deg")
 
         col = layout.box().column(align=True)
         col.label(text="Surface Detail")
-        col.prop(props, "disp_strength")
-        col.prop(props, "disp_scale")
-        col.prop(props, "disp_detail")
-        col.prop(props, "bevel_width")
-        col.prop(props, "bevel_segments")
-        col.prop(props, "bevel_angle_deg")
+        col.prop(props, "disp_strength"); col.prop(props, "disp_scale"); col.prop(props, "disp_detail")
+        col.prop(props, "bevel_width"); col.prop(props, "bevel_segments"); col.prop(props, "bevel_angle_deg")
 
         col = layout.box().column(align=True)
         col.label(text="Material")
-        col.prop(props, "roughness")
-        col.prop(props, "ior")
-        col.prop(props, "emission")
+        col.prop(props, "roughness"); col.prop(props, "ior"); col.prop(props, "emission")
 
         col = layout.box().column(align=True)
         col.label(text="Fractal Branching")
-        col.prop(props, "fractal_depth")
-        col.prop(props, "fractal_branch_prob")
-        col.prop(props, "fractal_scale_min")
-        col.prop(props, "fractal_scale_max")
-        col.prop(props, "fractal_branch_tilt")
+        col.prop(props, "fractal_depth"); col.prop(props, "fractal_branch_prob")
+        col.prop(props, "fractal_scale_min"); col.prop(props, "fractal_scale_max"); col.prop(props, "fractal_branch_tilt")
 
         col = layout.box().column(align=True)
         col.label(text="Radial Growth (Spokes)")
-        col.prop(props, "radial_growth")
-        col.prop(props, "radial_tilt_mode")
+        col.prop(props, "radial_growth"); col.prop(props, "radial_tilt_mode")
         if props.radial_tilt_mode == "CENTER_TO_EDGE":
             row = col.row(align=True)
-            row.prop(props, "angle_center_deg")
-            row.prop(props, "angle_edge_deg")
+            row.prop(props, "angle_center_deg"); row.prop(props, "angle_edge_deg")
         else:
             col.prop(props, "surface_tilt_deg")
-        col.prop(props, "surface_tilt_jitter")
-        col.prop(props, "radial_yaw_random")
+        col.prop(props, "surface_tilt_jitter"); col.prop(props, "radial_yaw_random")
+
+        layout.separator()
+        bake_box = layout.box()
+        bake_box.label(text="Bake / Export")
+        bake_box.label(text=f"Last Cluster: {props.last_cluster_name or '—'}")
+        row = bake_box.row(align=True)
+        row.prop(props, "bake_join_into_one"); row.prop(props, "bake_triangulate")
+        row = bake_box.row(align=True)
+        row.prop(props, "bake_include_base"); row.prop(props, "bake_keep_originals")
+        bake_box.operator("crystalgen.bake_last_cluster", text="Bake Last Cluster")
 
 # =========================
 # Register
@@ -772,6 +806,7 @@ classes = (
     CRYSTALGEN_Props,
     CRYSTALGEN_OT_generate_random,
     CRYSTALGEN_OT_generate_custom,
+    CRYSTALGEN_OT_bake_last,
     CRYSTALGEN_PT_panel,
 )
 
